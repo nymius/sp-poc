@@ -1,22 +1,29 @@
-use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 
+use db::{DatabaseBuffer, WriteRange};
 use kyoto::{
-    Block, Client, Event, HeaderCheckpoint, NodeBuilder, ScriptBuf, TrustedPeer,
+    Block, Client, Event, HeaderCheckpoint, Info, NodeBuilder, ScriptBuf, UnboundedReceiver,
+    Warning,
     tokio::{self, select},
 };
 
+use redb::Database;
+use request::TweakFetcher;
 use silentpayments::{
     Network, SilentPaymentAddress,
     receiving::{Label, Receiver},
     secp256k1::{PublicKey, Secp256k1, SecretKey},
-    utils::receiving::calculate_ecdh_shared_secret,
 };
 
-const NETWORK: Network = Network::Testnet;
-const VERSION: u8 = 0;
-const TWEAK: &str = "02b3ef612e8a27b65a7ab5f3dbaa0f3dfd91cf20f4b49fa256e60d8129afd781f4";
+mod db;
+mod request;
 
-fn build_public_key(message: &str) -> (SecretKey, PublicKey) {
+const NETWORK: Network = Network::Mainnet;
+const NODE_NETWORK: kyoto::Network = kyoto::Network::Bitcoin;
+const VERSION: u8 = 0;
+const RECOVERY_HEIGHT: u32 = 870_000;
+
+fn build_keypair(message: &str) -> (SecretKey, PublicKey) {
     let secret_bytes: [u8; 32] = message.as_bytes().to_vec()[..32].try_into().unwrap();
     let secret_key = SecretKey::from_slice(&secret_bytes).unwrap();
     (
@@ -37,50 +44,11 @@ fn find_tx(block: Block, scripts: &[ScriptBuf]) {
     }
 }
 
-#[tokio::main]
-async fn main() {
-    let subscriber = tracing_subscriber::FmtSubscriber::new();
-    tracing::subscriber::set_global_default(subscriber).unwrap();
-    // Set up the SP wallet
-    let scan_pk_bytes = "This is the start of a great silent payments address.";
-    let spend_pk_bytes = "This is the end of an awesome silent payments address";
-    let (scan_priv_key, scan_pk) = build_public_key(scan_pk_bytes);
-    let (spend_priv_key, spend_pk) = build_public_key(spend_pk_bytes);
-    let addr = SilentPaymentAddress::new(scan_pk, spend_pk, NETWORK, VERSION).unwrap();
-    tracing::info!("SP address: {addr}");
-    let receiver =
-        Receiver::new(0, scan_pk, spend_pk, Label::new(scan_priv_key, 0), NETWORK).unwrap();
-    let tweak_data = TWEAK.parse::<PublicKey>().unwrap();
-    let shared_secret = calculate_ecdh_shared_secret(&tweak_data, &scan_priv_key);
-    let spks_to_check = receiver
-        .get_spks_from_shared_secret(&shared_secret)
-        .unwrap();
-    let scripts = spks_to_check
-        .into_values()
-        .map(|bytes| ScriptBuf::from_bytes(bytes.to_vec()))
-        .collect::<Vec<ScriptBuf>>();
-    // Set up the light client
-    let peer_1: TrustedPeer = IpAddr::V4(Ipv4Addr::new(95, 217, 198, 121)).into();
-    let peer_2: TrustedPeer = IpAddr::V4(Ipv4Addr::new(23, 137, 57, 100)).into();
-    let checkpoint = HeaderCheckpoint::most_recent(kyoto::Network::Signet);
-    let builder = NodeBuilder::new(kyoto::Network::Signet);
-    let (node, client) = builder
-        .add_peer(peer_1)
-        .add_peer(peer_2)
-        .anchor_checkpoint(checkpoint)
-        .required_peers(2)
-        .build()
-        .unwrap();
-
-    tokio::task::spawn(async move { node.run().await });
-
-    let Client {
-        requester,
-        mut log_rx,
-        mut warn_rx,
-        mut event_rx,
-    } = client;
-
+async fn trace(
+    mut log_rx: kyoto::Receiver<String>,
+    mut info_rx: kyoto::Receiver<Info>,
+    mut warn_rx: UnboundedReceiver<Warning>,
+) {
     loop {
         select! {
             log = log_rx.recv() => {
@@ -88,37 +56,90 @@ async fn main() {
                     tracing::info!("{log}");
                 }
             }
+            info = info_rx.recv() => {
+                if let Some(info) = info {
+                    tracing::info!("{info}");
+                }
+            }
             warn = warn_rx.recv() => {
                 if let Some(warn) = warn {
                     tracing::warn!("{warn}");
                 }
             }
-            event = event_rx.recv() => {
-                if let Some(event) = event {
-                    match event {
-                        Event::Synced(update) => {
-                            tracing::info!("Synced chain up to block {}",update.tip().height);
-                            tracing::info!("Chain tip: {}",update.tip().hash);
-                            let fee = requester.broadcast_min_feerate().await.unwrap();
-                            tracing::info!("Minimum transaction broadcast fee rate: {}", fee);
-                            break;
-                        },
-                        Event::Block(indexed_block) => {
-                            let hash = indexed_block.block.block_hash();
-                            tracing::info!("Received block: {}", hash);
-                        },
-                        Event::BlocksDisconnected(_) => {
-                            tracing::warn!("Some blocks were reorganized")
-                        },
-                        Event::IndexedFilter(mut filter) => {
-                            if filter.contains_any(scripts.iter()) {
-                                let hash = *filter.block_hash();
-                                tracing::info!("Found script at {}!", hash);
-                                let indexed_block = requester.get_block(hash).await.unwrap();
-                                find_tx(indexed_block.block, &scripts);
-                                break;
-                            }
-                        },
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    let subscriber = tracing_subscriber::FmtSubscriber::new();
+    tracing::subscriber::set_global_default(subscriber).unwrap();
+    // Set up the SP wallet
+    let scan_pk_bytes = "This is the start of a great silent payments address.";
+    let spend_pk_bytes = "This is the end of an awesome silent payments address";
+    let (scan_priv_key, scan_pk) = build_keypair(scan_pk_bytes);
+    let (_spend_priv_key, spend_pk) = build_keypair(spend_pk_bytes);
+    let addr = SilentPaymentAddress::new(scan_pk, spend_pk, NETWORK, VERSION).unwrap();
+    tracing::info!("SP address: {addr}");
+    let sp_receiver =
+        Receiver::new(0, scan_pk, spend_pk, Label::new(scan_priv_key, 0), NETWORK).unwrap();
+    // Set up the database
+    tracing::info!("Setting up tweak database...");
+    let db = Arc::new(Database::create("tweak_data.redb").unwrap());
+    let mut db_buffer = DatabaseBuffer::new(Arc::clone(&db));
+    // Set up the light client
+    let checkpoint =
+        HeaderCheckpoint::closest_checkpoint_below_height(RECOVERY_HEIGHT, NODE_NETWORK);
+    let builder = NodeBuilder::new(NODE_NETWORK);
+    let (node, client) = builder
+        .anchor_checkpoint(checkpoint)
+        .required_peers(2)
+        .build()
+        .unwrap();
+    let (rtx, rrx) = tokio::sync::mpsc::unbounded_channel::<WriteRange>();
+    let http_client = reqwest::Client::new();
+    let mut tweak_fetcher = TweakFetcher::new(
+        Arc::clone(&db),
+        sp_receiver,
+        http_client,
+        scan_priv_key,
+        rrx,
+    );
+
+    tracing::info!("Starting the node...");
+    tokio::task::spawn(async move { node.run().await });
+
+    tracing::info!("Staring the HTTPS client...");
+    tokio::task::spawn(async move { tweak_fetcher.run().await });
+
+    let Client {
+        requester: _,
+        log_rx,
+        info_rx,
+        warn_rx,
+        mut event_rx,
+    } = client;
+
+    tracing::info!("Initializing log loop...");
+    tokio::task::spawn(async move { trace(log_rx, info_rx, warn_rx).await });
+
+    loop {
+        if let Some(event) = event_rx.recv().await {
+            match event {
+                Event::Synced(update) => {
+                    tracing::info!("Synced chain up to block {}", update.tip().height);
+                }
+                Event::Block(indexed_block) => {
+                    let hash = indexed_block.block.block_hash();
+                    tracing::info!("Received block: {}", hash);
+                }
+                Event::BlocksDisconnected(_) => {
+                    tracing::warn!("Some blocks were reorganized")
+                }
+                Event::IndexedFilter(filter) => {
+                    let changes = db_buffer.push_filter(filter);
+                    if let Some(change) = changes {
+                        rtx.send(change).unwrap();
                     }
                 }
             }
