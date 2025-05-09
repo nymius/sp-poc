@@ -1,6 +1,6 @@
 use std::{collections::HashSet, sync::Arc};
 
-use kyoto::{BlockFilter, ScriptBuf, UnboundedReceiver, tokio::time::Instant};
+use kyoto::{BlockFilter, UnboundedReceiver, tokio::time::Instant};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use redb::Database;
 use reqwest::Client;
@@ -57,7 +57,7 @@ impl TweakFetcher {
                 let table = read.open_table(TABLE_DEF).unwrap();
                 for (height, hash) in write_range.writes.into_iter() {
                     let request_string = format!(
-                        "https://silentpayments.dev/blindbit/mainnet/tweaks/{}",
+                        "https://silentpayments.dev/blindbit/mainnet/tweaks/{}?dustLimit=1000",
                         height
                     );
                     let then = Instant::now();
@@ -75,7 +75,7 @@ impl TweakFetcher {
                     let filter = BlockFilter::new(&filter_bytes.value());
                     time("Database read", then);
                     let then = Instant::now();
-                    let all_spks: HashSet<_> = tweaks
+                    let all_spks: HashSet<[u8; 34]> = tweaks
                         .par_iter()
                         .filter_map(|tweak| {
                             let shared_secret =
@@ -84,11 +84,7 @@ impl TweakFetcher {
                                 .get_spks_from_shared_secret(&shared_secret)
                                 .ok()
                         })
-                        .map(|map| {
-                            map.into_values()
-                                .map(|bytes| ScriptBuf::from_bytes(bytes.to_vec()))
-                                .collect::<HashSet<_>>()
-                        })
+                        .map(|map| map.into_values().collect::<HashSet<_>>())
                         .reduce(HashSet::new, |mut acc, set| {
                             acc.extend(set);
                             acc
@@ -96,7 +92,7 @@ impl TweakFetcher {
                     time("Computing SPKs", then);
                     let then = Instant::now();
                     if filter
-                        .match_any(&hash, all_spks.iter().map(|script| script.to_bytes()))
+                        .match_any(&hash, all_spks.into_iter())
                         .unwrap()
                     {
                         tracing::info!("Found a match at {height}");

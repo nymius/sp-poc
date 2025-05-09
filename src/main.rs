@@ -92,7 +92,7 @@ async fn main() {
         HeaderCheckpoint::closest_checkpoint_below_height(RECOVERY_HEIGHT, NODE_NETWORK);
     let builder = NodeBuilder::new(NODE_NETWORK);
     let (node, client) = builder
-        .anchor_checkpoint(checkpoint)
+        .after_checkpoint(checkpoint)
         .required_peers(2)
         .build()
         .unwrap();
