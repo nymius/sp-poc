@@ -5,8 +5,12 @@ edition = "2024"
 
 [dependencies]
 bitcoin = "0.31.0"
+<<<<<<< HEAD
 kyoto-cbf = { path = "../kyoto/", features = ["filter-control", "rusqlite"], default-features = false }
 futures = "0.3"
+=======
+kyoto-cbf = { version = "0.10.0", features = ["filter-control", "rusqlite"], default-features = false }
+>>>>>>> b3fa843 (cargo: dont use local version of kyoto)
 rayon = "1.10.0"
 redb = "2.4.0"
 reqwest = { version = "0.12.15", features = ["json", "rustls-tls", "http2", "charset"], default-features = false }
