@@ -40,6 +40,7 @@ impl TweakFetcher {
     pub async fn run(&mut self) {
         loop {
             if let Some(write_range) = self.requests.recv().await {
+                let _ = write_range.writes.len();
                 tracing::info!(
                     "Requesting tweaks up to {}",
                     write_range
@@ -68,7 +69,7 @@ impl TweakFetcher {
                             (height, hash, tweaks)
                         }
                     })
-                    .buffer_unordered(100);
+                    .buffer_unordered(200);
 
                 while let Some((height, hash, tweaks)) = stream.next().await {
                     let filter_bytes = table.get(&height).unwrap().unwrap();

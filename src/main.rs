@@ -21,7 +21,7 @@ mod request;
 const NETWORK: Network = Network::Mainnet;
 const NODE_NETWORK: kyoto::Network = kyoto::Network::Bitcoin;
 const VERSION: u8 = 0;
-const RECOVERY_HEIGHT: u32 = 870_000;
+const RECOVERY_HEIGHT: u32 = 800_000;
 
 fn build_keypair(message: &str) -> (SecretKey, PublicKey) {
     let secret_bytes: [u8; 32] = message.as_bytes().to_vec()[..32].try_into().unwrap();
@@ -85,7 +85,7 @@ async fn main() {
     let sp_receiver =
         Receiver::new(0, scan_pk, spend_pk, Label::new(scan_priv_key, 0), NETWORK).unwrap();
     // Set up the database
-    tracing::info!("Setting up tweak database...");
+    tracing::info!("Setting up filter database...");
     let db = Arc::new(Database::create("filter_data.redb").unwrap());
     let mut db_buffer = DatabaseBuffer::new(Arc::clone(&db));
     // Set up the light client
@@ -94,7 +94,7 @@ async fn main() {
     let builder = NodeBuilder::new(NODE_NETWORK);
     let (node, client) = builder
         .after_checkpoint(checkpoint)
-        .required_peers(2)
+        .required_peers(3)
         .build()
         .unwrap();
     let (rtx, rrx) = tokio::sync::mpsc::unbounded_channel::<WriteRange>();
@@ -129,6 +129,8 @@ async fn main() {
             match event {
                 Event::Synced(update) => {
                     tracing::info!("Synced chain up to block {}", update.tip().height);
+                    let changes = db_buffer.write_queue();
+                    rtx.send(changes).unwrap();
                 }
                 Event::Block(indexed_block) => {
                     let hash = indexed_block.block.block_hash();
