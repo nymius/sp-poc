@@ -1,6 +1,6 @@
 use std::{collections::HashSet, sync::Arc};
 
-use kyoto::{BlockFilter, UnboundedReceiver, tokio::time::Instant};
+use kyoto::{BlockFilter, UnboundedReceiver};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use redb::Database;
 use reqwest::Client;
@@ -10,12 +10,6 @@ use silentpayments::{
 };
 
 use crate::db::{TABLE_DEF, WriteRange};
-
-fn time(what: &str, then: Instant) {
-    let now = Instant::now();
-    let duration = now.duration_since(then).as_micros();
-    tracing::info!("{what} took {duration} microseconds");
-}
 
 pub struct TweakFetcher {
     db: Arc<Database>,
@@ -60,21 +54,14 @@ impl TweakFetcher {
                         "https://silentpayments.dev/blindbit/mainnet/tweaks/{}?dustLimit=1000",
                         height
                     );
-                    let then = Instant::now();
                     let response = self.client.get(request_string).send().await.unwrap();
-                    time("HTTP query", then);
-                    let then = Instant::now();
                     let tweaks: Vec<String> = response.json().await.unwrap();
                     let tweaks: Vec<PublicKey> = tweaks
                         .into_iter()
                         .map(|str| str.parse::<PublicKey>().unwrap())
                         .collect();
-                    time("Parsing", then);
-                    let then = Instant::now();
                     let filter_bytes = table.get(&height).unwrap().unwrap();
                     let filter = BlockFilter::new(&filter_bytes.value());
-                    time("Database read", then);
-                    let then = Instant::now();
                     let all_spks: HashSet<[u8; 34]> = tweaks
                         .par_iter()
                         .filter_map(|tweak| {
@@ -89,15 +76,12 @@ impl TweakFetcher {
                             acc.extend(set);
                             acc
                         });
-                    time("Computing SPKs", then);
-                    let then = Instant::now();
                     if filter
                         .match_any(&hash, all_spks.into_iter())
                         .unwrap()
                     {
                         tracing::info!("Found a match at {height}");
                     }
-                    time("Matching scripts", then);
                 }
             }
         }

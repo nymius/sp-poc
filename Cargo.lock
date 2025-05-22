@@ -108,7 +108,7 @@ version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "53157fcb2d6ec2851c7602d0690536d0b79209e393972cb2b36bd5d72dbd1879"
 dependencies = [
- "bitcoin 0.32.5",
+ "bitcoin 0.32.6",
  "bitcoin_hashes 0.15.0",
  "chacha20-poly1305",
  "rand 0.8.5",
@@ -131,9 +131,9 @@ dependencies = [
 
 [[package]]
 name = "bitcoin"
-version = "0.32.5"
+version = "0.32.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce6bc65742dea50536e35ad42492b234c27904a27f0abdcbce605015cb4ea026"
+checksum = "ad8929a18b8e33ea6b3c09297b687baaa71fb1b97353243a3f1029fad5c59c5b"
 dependencies = [
  "base58ck",
  "bech32 0.11.0",
@@ -778,7 +778,7 @@ name = "kyoto-cbf"
 version = "0.11.0"
 dependencies = [
  "bip324",
- "bitcoin 0.32.5",
+ "bitcoin 0.32.6",
  "rusqlite",
  "tokio",
 ]
