@@ -1,3 +1,4 @@
 /target
 /light_client_data
 *.redb
+Cargo.lock
