@@ -134,7 +134,7 @@ async fn main() {
                     let hash = indexed_block.block.block_hash();
                     tracing::info!("Received block: {}", hash);
                 }
-                Event::BlocksDisconnected { accepted: _, disconnected: _ } => {
+                Event::BlocksDisconnected(_) => {
                     tracing::warn!("Some blocks were reorganized")
                 }
                 Event::IndexedFilter(filter) => {
