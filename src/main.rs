@@ -32,6 +32,7 @@ fn build_keypair(message: &str) -> (SecretKey, PublicKey) {
     )
 }
 
+#[allow(unused)]
 fn find_tx(block: Block, scripts: &[ScriptBuf]) {
     for tx in block.txdata {
         if tx
@@ -85,7 +86,7 @@ async fn main() {
         Receiver::new(0, scan_pk, spend_pk, Label::new(scan_priv_key, 0), NETWORK).unwrap();
     // Set up the database
     tracing::info!("Setting up tweak database...");
-    let db = Arc::new(Database::create("tweak_data.redb").unwrap());
+    let db = Arc::new(Database::create("filter_data.redb").unwrap());
     let mut db_buffer = DatabaseBuffer::new(Arc::clone(&db));
     // Set up the light client
     let checkpoint =
@@ -133,7 +134,7 @@ async fn main() {
                     let hash = indexed_block.block.block_hash();
                     tracing::info!("Received block: {}", hash);
                 }
-                Event::BlocksDisconnected(_) => {
+                Event::BlocksDisconnected { accepted: _, disconnected: _ } => {
                     tracing::warn!("Some blocks were reorganized")
                 }
                 Event::IndexedFilter(filter) => {

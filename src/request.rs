@@ -1,3 +1,4 @@
+use futures::StreamExt;
 use std::{collections::HashSet, sync::Arc};
 
 use kyoto::{BlockFilter, UnboundedReceiver};
@@ -49,17 +50,27 @@ impl TweakFetcher {
                 );
                 let read = self.db.begin_read().unwrap();
                 let table = read.open_table(TABLE_DEF).unwrap();
-                for (height, hash) in write_range.writes.into_iter() {
-                    let request_string = format!(
-                        "https://silentpayments.dev/blindbit/mainnet/tweaks/{}?dustLimit=1000",
-                        height
-                    );
-                    let response = self.client.get(request_string).send().await.unwrap();
-                    let tweaks: Vec<String> = response.json().await.unwrap();
-                    let tweaks: Vec<PublicKey> = tweaks
-                        .into_iter()
-                        .map(|str| str.parse::<PublicKey>().unwrap())
-                        .collect();
+                let client = self.client.clone();
+                let mut stream = futures::stream::iter(write_range.writes.into_iter())
+                    .map(move |(height, hash)| {
+                        let client = client.clone();
+                        let request_string = format!(
+                            "https://silentpayments.dev/blindbit/mainnet/tweaks/{}?dustLimit=1000",
+                            height
+                        );
+                        async move {
+                            let response = client.get(request_string).send().await.unwrap();
+                            let tweaks: Vec<String> = response.json().await.unwrap();
+                            let tweaks: Vec<PublicKey> = tweaks
+                                .into_iter()
+                                .map(|str| str.parse::<PublicKey>().unwrap())
+                                .collect();
+                            (height, hash, tweaks)
+                        }
+                    })
+                    .buffer_unordered(100);
+
+                while let Some((height, hash, tweaks)) = stream.next().await {
                     let filter_bytes = table.get(&height).unwrap().unwrap();
                     let filter = BlockFilter::new(&filter_bytes.value());
                     let all_spks: HashSet<[u8; 34]> = tweaks
@@ -76,10 +87,8 @@ impl TweakFetcher {
                             acc.extend(set);
                             acc
                         });
-                    if filter
-                        .match_any(&hash, all_spks.into_iter())
-                        .unwrap()
-                    {
+
+                    if filter.match_any(&hash, all_spks.into_iter()).unwrap() {
                         tracing::info!("Found a match at {height}");
                     }
                 }
