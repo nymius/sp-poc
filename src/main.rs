@@ -1,28 +1,64 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, net::Ipv4Addr, sync::Arc};
 
+use bdk_sp::{
+    bitcoin::{
+        Network,
+        secp256k1::{PublicKey, Secp256k1, SecretKey},
+    },
+    encoding::SilentPaymentCode,
+    receive::scan::Scanner,
+};
+use bitcoin::secp256k1::Scalar;
 use db::{DatabaseBuffer, WriteRange};
 use kyoto::{
-    Block, Client, Event, HeaderCheckpoint, Info, NodeBuilder, ScriptBuf, UnboundedReceiver,
-    Warning,
-    tokio::{self, select},
+    tokio::{self, select}, AddrV2, Block, Client, Event, HeaderCheckpoint, Info, NodeBuilder, ScriptBuf, ServiceFlags, TrustedPeer, UnboundedReceiver, Warning
 };
 
+use miniscript::{
+    Descriptor,
+    descriptor::{DescriptorSecretKey, DescriptorType},
+};
 use redb::Database;
 use request::TweakFetcher;
-use silentpayments::{
-    Network, SilentPaymentAddress,
-    receiving::{Label, Receiver},
-    secp256k1::{PublicKey, Secp256k1, SecretKey},
-};
 
 mod db;
 mod request;
 
-const NETWORK: Network = Network::Mainnet;
-const NODE_NETWORK: kyoto::Network = kyoto::Network::Bitcoin;
+const NETWORK: Network = Network::Regtest;
+const NODE_NETWORK: kyoto::Network = kyoto::Network::Regtest;
 const VERSION: u8 = 0;
 const RECOVERY_HEIGHT: u32 = 800_000;
 
+fn get_keypair_from_descriptor(desc_str: &str) -> Option<(SecretKey, PublicKey)> {
+    let secp = Secp256k1::signing_only();
+    let (descriptor, keymap) =
+        Descriptor::parse_descriptor(&secp, desc_str).expect("wrong descriptor");
+
+    if descriptor.desc_type() != DescriptorType::Tr {
+        return None;
+    }
+
+    if keymap.is_empty() {
+        return None;
+    }
+
+    // note: we're only looking at the first entry in the keymap
+    // the idea is to find something that impls `GetKey`
+    match keymap.iter().next().expect("not empty") {
+        (_, DescriptorSecretKey::XPrv(xpriv)) => {
+            let derived_key = xpriv
+                .xkey
+                .derive_priv(&secp, &xpriv.derivation_path)
+                .expect("should derive");
+            let sk = derived_key.private_key;
+            let pk = sk.public_key(&secp);
+            Some((sk, pk))
+        }
+        _ => unimplemented!("multi xkey signer"),
+    }
+}
+
+#[allow(unused)]
 fn build_keypair(message: &str) -> (SecretKey, PublicKey) {
     let secret_bytes: [u8; 32] = message.as_bytes().to_vec()[..32].try_into().unwrap();
     let secret_key = SecretKey::from_slice(&secret_bytes).unwrap();
@@ -76,15 +112,40 @@ async fn main() {
     let subscriber = tracing_subscriber::FmtSubscriber::new();
     tracing::subscriber::set_global_default(subscriber).unwrap();
     // Set up the SP wallet
-    let scan_pk_bytes = "This is the start of a great silent payments address.";
-    let spend_pk_bytes = "This is the end of an awesome silent payments address";
-    let (scan_priv_key, scan_pk) = build_keypair(scan_pk_bytes);
-    let (_spend_priv_key, spend_pk) = build_keypair(spend_pk_bytes);
-    let addr = SilentPaymentAddress::new(scan_pk, spend_pk, NETWORK, VERSION).unwrap();
+    let scan_descriptor: String = std::env::var("SCAN_DESCRIPTOR")
+        .expect("provide scan private descriptor as environment variable");
+    let spend_descriptor: String = std::env::var("SPEND_DESCRIPTOR")
+        .expect("provide spend private descriptor as environment variable");
+    let (scan_sk, scan_pk) = if let Some(keys) = get_keypair_from_descriptor(&scan_descriptor) {
+        keys
+    } else {
+        return;
+    };
+
+    let (_, spend_pk) = if let Some(keys) = get_keypair_from_descriptor(&spend_descriptor) {
+        keys
+    } else {
+        return;
+    };
+
+    let addr = SilentPaymentCode {
+        scan: scan_pk,
+        spend: spend_pk,
+        network: NETWORK,
+        version: VERSION,
+    };
     tracing::info!("SP address: {addr}");
-    let sp_receiver =
-        Receiver::new(0, scan_pk, spend_pk, Label::new(scan_priv_key, 0), NETWORK).unwrap();
+    let label_lookup: BTreeMap<PublicKey, (Scalar, u32)> = BTreeMap::default();
+    let sp_scanner = Scanner::new(scan_sk, spend_pk, label_lookup);
     // Set up the database
+
+    // Add regtest node as Peer
+    let peer = TrustedPeer::new(
+        AddrV2::Ipv4(Ipv4Addr::new(127, 0, 0, 1)),
+        None,
+        ServiceFlags::P2P_V2,
+    );
+
     tracing::info!("Setting up filter database...");
     let db = Arc::new(Database::create("filter_data.redb").unwrap());
     let mut db_buffer = DatabaseBuffer::new(Arc::clone(&db));
@@ -94,18 +155,13 @@ async fn main() {
     let builder = NodeBuilder::new(NODE_NETWORK);
     let (node, client) = builder
         .after_checkpoint(checkpoint)
-        .required_peers(3)
+        .add_peer(peer)
+        .required_peers(1)
         .build()
         .unwrap();
     let (rtx, rrx) = tokio::sync::mpsc::unbounded_channel::<WriteRange>();
     let http_client = reqwest::Client::new();
-    let mut tweak_fetcher = TweakFetcher::new(
-        Arc::clone(&db),
-        sp_receiver,
-        http_client,
-        scan_priv_key,
-        rrx,
-    );
+    let mut tweak_fetcher = TweakFetcher::new(Arc::clone(&db), sp_scanner, http_client, rrx);
 
     tracing::info!("Starting the node...");
     tokio::task::spawn(async move { node.run().await });
